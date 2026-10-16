@@ -1,0 +1,133 @@
+﻿<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8">
+  <title>スコアボード</title>
+  <link rel="stylesheet" href="./style.css?v=21">
+</head>
+
+<body>
+
+  <!-- ハンバーガーアイコン -->
+  <div class="hamburger" onclick="toggleMenu()">
+    <span></span>
+    <span></span>
+    <span></span>
+  </div>
+
+  <!-- サイドメニュー（コントロールパネル） -->
+  <div class="menu" id="menu">
+    <div class="menu-title">試合前の準備</div>
+    <button id="reset-button">タイマーをリセット（前半 00:00）</button>
+    <button id="score-reset-button">スコアを 0 - 0 に戻す</button>
+    <button id="bar-button" onclick="toggleBar()">下部の操作バー [ 表示 ]</button>
+
+    <div class="menu-title">API自動同期</div>
+    <input type="password" id="api-key" placeholder="APIキーを入力" autocomplete="off" spellcheck="false">
+    <button id="picker-button" onclick="openPicker()">試合を選ぶ</button>
+    <div id="selected-match" class="menu-match">試合: 未選択</div>
+    <button id="sync-button" title="ON の間、タイマーが動いているときだけ 80秒ごとにスコアを取得します">自動同期 [ OFF ]</button>
+    <div id="api-match" class="menu-match">API: 未取得</div>
+    <div id="api-status" class="menu-status"></div>
+
+    <div class="menu-title">表示</div>
+    <button onclick="toggleTheme()">背景色反転</button>
+    <button id="logo-button" onclick="toggleLogo()">ロゴ表示 [ OFF ]</button>
+    <button onclick="startLayoutEdit()">配置を編集する（移動・大きさ）</button>
+  </div>
+
+  <!-- 試合選択画面（プレミアリーグ・ラ・リーガ・チャンピオンズリーグ） -->
+  <div id="picker" class="picker">
+    <div class="picker-box">
+      <div class="picker-head">
+        <span class="picker-title">試合を選ぶ</span>
+        <button class="picker-close" onclick="closePicker()">×</button>
+      </div>
+      <div class="picker-row">
+        <button id="picker-next24" onclick="setPickerMode('next24')">これから24時間</button>
+        <button onclick="movePickerDay(-1)">◀ 前日</button>
+        <span id="picker-date" class="picker-date"></span>
+        <button onclick="movePickerDay(1)">翌日 ▶</button>
+      </div>
+      <div class="picker-row" id="picker-leagues">
+        <button data-league="all">すべて</button>
+        <button data-league="39">プレミアリーグ</button>
+        <button data-league="140">ラ・リーガ</button>
+        <button data-league="2">チャンピオンズリーグ</button>
+      </div>
+      <input type="text" id="picker-search" placeholder="チーム名で絞り込み（例: Manchester）" autocomplete="off">
+      <div id="picker-message" class="picker-message"></div>
+      <div id="picker-list" class="picker-list"></div>
+    </div>
+  </div>
+
+  <!-- 下部の操作バー -->
+  <div id="control-bar">
+    <!-- 試合中に使うボタン -->
+    <div class="bar-normal">
+      <div class="bar-group">
+        <button id="start-button">スタート</button>
+        <button id="pause-button" disabled>一時停止</button>
+        <button id="second-half-button">後半開始（45:00）</button>
+        <button data-add="-60">-1分</button>
+        <button data-add="60">+1分</button>
+        <button data-add="300">+5分</button>
+        <button id="edit-time-button" title="タイマーの数字をクリックしても入力できます">✎ 時間を入力</button>
+      </div>
+      <div class="bar-group">
+        <span id="bar-home" class="bar-label">HOME</span>
+        <button data-score="home" data-delta="1">+1</button>
+        <button data-score="home" data-delta="-1">-1</button>
+        <span id="bar-away" class="bar-label">AWAY</span>
+        <button data-score="away" data-delta="1">+1</button>
+        <button data-score="away" data-delta="-1">-1</button>
+      </div>
+      <div id="bar-sync" class="bar-sync">API: OFF</div>
+      <div id="bar-hint" class="bar-hint">タイマー・チーム名は直接入力もできます</div>
+    </div>
+
+    <!-- 配置編集中のボタン -->
+    <div class="bar-layout">
+      <div class="bar-group">
+        <span class="bar-label">配置を編集中</span>
+        <button onclick="centerParts()">表示を整列</button>
+        <button onclick="resetLayout()">初期状態に戻す</button>
+        <button class="bar-primary" onclick="endLayoutEdit()">編集を終わる</button>
+      </div>
+      <div class="bar-hint active">パーツをドラッグで移動、右下の四角をドラッグで大きさを変更</div>
+    </div>
+  </div>
+
+  <!-- 3つのパーツ（位置と大きさは個別に保存） -->
+  <div id="part-timer" class="part">
+    <span id="timer" contenteditable="true" title="クリックして時間を直接入力（例: 23:30 → Enter）">00:00</span>
+    <div class="resizer" data-target="part-timer"></div>
+  </div>
+
+  <div id="part-half" class="part">
+    <span id="half-label">前半</span>
+    <div class="resizer" data-target="part-half"></div>
+  </div>
+
+  <div id="part-score" class="part">
+    <div class="team home">
+      <img id="home-logo" class="logo" alt="">
+      <span id="home-name" class="team-name" contenteditable="true">HOME</span>
+    </div>
+    <div class="score">
+      <span id="home-score">0</span>
+      <span class="dash">-</span>
+      <span id="away-score">0</span>
+    </div>
+    <div class="team away">
+      <span id="away-name" class="team-name" contenteditable="true">AWAY</span>
+      <img id="away-logo" class="logo" alt="">
+    </div>
+    <div class="resizer" data-target="part-score"></div>
+  </div>
+
+  <script src="./scoreboard.js?v=21"></script>
+</body>
+
+</html>
