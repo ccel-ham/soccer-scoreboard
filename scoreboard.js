@@ -337,6 +337,9 @@ function nearDailyLimit() {
 
 // ==== 試合選択（プレミアリーグ・ラ・リーガ・チャンピオンズリーグ） ====
 // 無料プランでは「日付指定でその日の全試合」だけが取れるので、取得後に3大会に絞る
+// 無料プランで指定できる日付は「世界標準時(UTC)の今日の前後1日」だけ。
+// 日本時間の日付で取ると、0〜9時は「明日」が範囲外になって一覧全体が取れなくなるため、
+// 「これから24時間」は UTC の日付で取る（今日・明日の2日分で必ず24時間先まで入る）
 const LEAGUES = { 39: "プレミアリーグ", 140: "ラ・リーガ", 2: "チャンピオンズリーグ" };
 const JST_OFFSET_MS = 9 * 3600 * 1000;
 const PAST_WINDOW_SEC = 3 * 3600;     // 「これから24時間」に、3時間前までに始まった試合も含める
@@ -348,7 +351,8 @@ const STATUS_LABEL = {
 };
 const LIVE_STATUSES = ["1H", "HT", "2H", "ET", "BT", "P", "LIVE", "SUSP", "INT"];
 
-const dayCache = {};          // 日付ごとの取得結果（ページを開いている間だけ。同じ日は再取得しない）
+const dayCache = {};          // 日付ごとの取得結果（ページを開いている間だけ）
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10分たったら取り直す（「開始前」のまま古い状態が残らないように）
 let pickerMode = "next24";    // "next24" または "YYYY-MM-DD"
 let pickerLeague = "all";
 let pickerFixtures = [];
@@ -374,11 +378,35 @@ function formatKickoff(timestamp) {
     return `${formatDate(d.toISOString().slice(0, 10))} ${time}`;
 }
 
-async function fetchDay(dateStr) {
-    if (dayCache[dateStr]) return dayCache[dateStr];
-    const data = await callApi(`/fixtures?date=${dateStr}&timezone=Asia/Tokyo`);
+function utcDate(ms) {
+    return new Date(ms).toISOString().slice(0, 10);
+}
+
+// tz は "Asia/Tokyo"（日付を選んだとき）か "UTC"（これから24時間）
+function cacheKey(dateStr, tz) {
+    return `${dateStr}|${tz}`;
+}
+
+function isCached(dateStr, tz) {
+    const c = dayCache[cacheKey(dateStr, tz)];
+    return !!c && Date.now() - c.at < CACHE_TTL_MS;
+}
+
+async function fetchDay(dateStr, tz) {
+    const key = cacheKey(dateStr, tz);
+    if (isCached(dateStr, tz)) return dayCache[key].list;
+    let data;
+    try {
+        data = await callApi(`/fixtures?date=${dateStr}&timezone=${tz}`);
+    } catch (e) {
+        // 無料プランの日付の範囲外（英語のメッセージを分かりやすく言い換える）
+        if (/access to this date/i.test(e.message)) {
+            throw new Error("無料プランで見られるのは、前日〜翌日の試合までです");
+        }
+        throw e;
+    }
     if (requestsUsed !== null) requestsUsed++;
-    dayCache[dateStr] = (data.response || [])
+    const list = (data.response || [])
         .filter(f => LEAGUES[f.league.id])
         .map(f => ({
             id: f.fixture.id,
@@ -392,7 +420,8 @@ async function fetchDay(dateStr) {
             homeLogo: f.teams.home.logo,
             awayLogo: f.teams.away.logo
         }));
-    return dayCache[dateStr];
+    dayCache[key] = { at: Date.now(), list };
+    return list;
 }
 
 function setPickerMessage(text, isError) {
@@ -432,22 +461,24 @@ async function loadPicker() {
     if (!readApiKey()) return;
 
     const now = Date.now();
-    const today = jstDate(now);
-    let dates;
+    let dates, tz;
     if (pickerMode === "next24") {
+        tz = "UTC";
+        const today = utcDate(now);
         dates = [today, addDays(today, 1)];
-        // 深夜0〜3時は、前日の夜に始まった試合も入るよう前日分も取る
-        if (new Date(now + JST_OFFSET_MS).getUTCHours() < 3) dates.unshift(addDays(today, -1));
+        // UTC 0〜3時（日本時間 9〜12時）は、3時間前までに始まった試合も入るよう前日分も取る
+        if (new Date(now).getUTCHours() < 3) dates.unshift(addDays(today, -1));
     } else {
+        tz = "Asia/Tokyo";
         dates = [pickerMode];
     }
 
-    const needed = dates.filter(d => !dayCache[d]).length;
+    const needed = dates.filter(d => !isCached(d, tz)).length;
     setPickerMessage(needed ? `読み込み中…（API を ${needed}回 使います）` : "");
     try {
         if (requestsUsed === null) await checkStatus();
         let list = [];
-        for (const d of dates) list = list.concat(await fetchDay(d));
+        for (const d of dates) list = list.concat(await fetchDay(d, tz));
 
         const nowSec = Math.floor(now / 1000);
         if (pickerMode === "next24") {
@@ -462,6 +493,9 @@ async function loadPicker() {
         setPickerMessage(usageText());
         renderPickerList();
     } catch (e) {
+        // 前に表示していた別の日の一覧が残らないように消す
+        pickerFixtures = [];
+        $("picker-list").innerHTML = "";
         setPickerMessage(`試合一覧を取得できませんでした（${e.message}）`, true);
     }
 }
