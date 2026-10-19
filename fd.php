@@ -49,6 +49,7 @@ if ($path === 'matches') {
 
 $url = FD_BASE . $path . ($query ? '?' . http_build_query($query) : '');
 $remaining = null;
+$reset = null;
 $ch = curl_init($url);
 curl_setopt_array($ch, [
     CURLOPT_RETURNTRANSFER => true,
@@ -56,9 +57,11 @@ curl_setopt_array($ch, [
     CURLOPT_CONNECTTIMEOUT => 5,
     CURLOPT_TIMEOUT => 10,
     CURLOPT_FOLLOWLOCATION => false,
-    CURLOPT_HEADERFUNCTION => function ($ch, $line) use (&$remaining) {
+    CURLOPT_HEADERFUNCTION => function ($ch, $line) use (&$remaining, &$reset) {
         if (stripos($line, 'X-Requests-Available-Minute:') === 0) {
             $remaining = (int)trim(substr($line, strlen('X-Requests-Available-Minute:')));
+        } elseif (stripos($line, 'X-RequestCounter-Reset:') === 0) {
+            $reset = (int)trim(substr($line, strlen('X-RequestCounter-Reset:')));
         }
         return strlen($line);
     },
@@ -71,5 +74,6 @@ if ($body === false || $status === 0) fail(502, 'football-data.org と通信で�
 
 // 1分あたりの残り回数をページに伝える（無料プランは1分10回）
 if ($remaining !== null) header('X-FD-Available-Minute: ' . $remaining);
+if ($reset !== null) header('X-FD-Reset: ' . $reset);
 http_response_code($status);
 echo $body;

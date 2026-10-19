@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <title>スコアボード</title>
-  <link rel="stylesheet" href="./style.css?v=25">
+  <link rel="stylesheet" href="./style.css?v=32">
 </head>
 
 <body>
@@ -18,25 +18,36 @@
 
   <!-- サイドメニュー（コントロールパネル） -->
   <div class="menu" id="menu">
+    <section class="menu-section">
     <div class="menu-title">試合前の準備</div>
     <button id="reset-button">タイマーをリセット（前半 00:00）</button>
     <button id="score-reset-button">スコアを 0 - 0 に戻す</button>
-    <button id="bar-button" onclick="toggleBar()">下部の操作バー [ 表示 ]</button>
+    <button id="bar-button" onclick="toggleBar()">下部の操作バー</button>
+    </section>
 
+    <section class="menu-section">
     <div class="menu-title">API自動同期</div>
+    <div class="menu-row provider-row">
+      <button data-provider="af" title="1日100回まで。80秒ごとに取得します">API-FOOTBALL</button>
+      <button data-provider="fd" title="1分10回まで・1日の上限なし。6秒ごとに取得します。無料プランはスコアが遅れて届きます">football-data</button>
+    </div>
     <input type="password" id="api-key" placeholder="API-FOOTBALL のキー" autocomplete="off" spellcheck="false">
-    <input type="password" id="fd-key" placeholder="予備: football-data.org のキー（任意）" autocomplete="off" spellcheck="false" title="API-FOOTBALL が1日の上限やエラーのときに使います。スコアは少し遅れて届きます">
+    <input type="password" id="fd-key" placeholder="football-data.org のキー" autocomplete="off" spellcheck="false">
     <label class="menu-check" title="オンにすると、次に開いたときもキーが入った状態になります。共用のパソコンではオフのままにしてください"><input type="checkbox" id="api-key-save"> このブラウザにキーを保存する</label>
-    <button id="picker-button" onclick="openPicker()">試合を選ぶ</button>
+    <button id="picker-button" class="menu-primary" onclick="openPicker()">試合を選ぶ</button>
     <div id="selected-match" class="menu-match">試合: 未選択</div>
-    <button id="sync-button" title="ON の間、タイマーが動いているときだけ 80秒ごとにスコアを取得します">自動同期 [ OFF ]</button>
+    <button id="sync-button" title="ON の間、タイマーが動いているときだけ 80秒ごとにスコアを取得します">自動同期</button>
     <div id="api-match" class="menu-match">API: 未取得</div>
     <div id="api-status" class="menu-status"></div>
+    <div id="api-log" class="menu-status"></div>
+    </section>
 
+    <section class="menu-section">
     <div class="menu-title">表示</div>
-    <button onclick="toggleTheme()">背景色反転</button>
-    <button id="logo-button" onclick="toggleLogo()">ロゴ表示 [ OFF ]</button>
+    <button id="theme-button" onclick="toggleTheme()">背景を黒にする</button>
+    <button id="logo-button" onclick="toggleLogo()">ロゴ表示</button>
     <button onclick="startLayoutEdit()">配置を編集する（移動・大きさ）</button>
+    </section>
   </div>
 
   <!-- 試合選択画面（プレミアリーグ・ラ・リーガ・チャンピオンズリーグ） -->
@@ -69,23 +80,34 @@
     <!-- 試合中に使うボタン -->
     <div class="bar-normal">
       <div class="bar-group">
-        <button id="start-button">スタート</button>
-        <button id="pause-button" disabled>一時停止</button>
+        <button id="start-button" title="押すたびにスタート（再開）と一時停止が切り替わります">スタート</button>
         <button id="second-half-button">後半開始（45:00）</button>
+      </div>
+      <div class="bar-group">
         <button data-add="-60">-1分</button>
         <button data-add="60">+1分</button>
         <button data-add="300">+5分</button>
         <button id="edit-time-button" title="タイマーの数字をクリックしても入力できます">✎ 時間を入力</button>
       </div>
       <div class="bar-group">
-        <span id="bar-home" class="bar-label">HOME</span>
-        <button data-score="home" data-delta="1">+1</button>
-        <button data-score="home" data-delta="-1">-1</button>
-        <span id="bar-away" class="bar-label">AWAY</span>
-        <button data-score="away" data-delta="1">+1</button>
-        <button data-score="away" data-delta="-1">-1</button>
+        <div class="bar-team">
+          <span id="bar-home" class="bar-label">HOME</span>
+          <button data-score="home" data-delta="1">+1</button>
+          <button data-score="home" data-delta="-1">-1</button>
+        </div>
+        <div class="bar-team">
+          <span id="bar-away" class="bar-label">AWAY</span>
+          <button data-score="away" data-delta="1">+1</button>
+          <button data-score="away" data-delta="-1">-1</button>
+        </div>
       </div>
-      <div id="bar-sync" class="bar-sync">API: OFF</div>
+      <div id="bar-sync" class="bar-sync" data-state="off">
+        <span class="sync-ring" aria-hidden="true">
+          <svg viewBox="0 0 36 36"><circle class="ring-bg" cx="18" cy="18" r="15.5"></circle><circle class="ring-fg" id="sync-ring-fg" cx="18" cy="18" r="15.5"></circle></svg>
+          <span id="sync-ring-num" class="ring-num">-</span>
+        </span>
+        <span id="sync-label" class="sync-label">API: OFF</span>
+      </div>
       <div id="bar-hint" class="bar-hint">タイマー・チーム名は直接入力もできます</div>
     </div>
 
@@ -129,7 +151,7 @@
     <div class="resizer" data-target="part-score"></div>
   </div>
 
-  <script src="./scoreboard.js?v=25"></script>
+  <script src="./scoreboard.js?v=32"></script>
 </body>
 
 </html>

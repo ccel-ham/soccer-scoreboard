@@ -1,24 +1,24 @@
 // サッカー配信用スコアボード
 // ・タイマーはブラウザ側で1秒ごとに表示を更新（開始時刻を基準に計算するので、再読み込みしてもずれない）
-// ・スコアは API-FOOTBALL から、選んだ試合を約80秒に1回取得（タイマーが動いている間だけ）。手動の +1 / -1 も可能
-// ・予備として football-data.org も使える（キーを入れたときだけ）。API-FOOTBALL が上限・エラーのときに切り替える。
+// ・スコアは、サイドバーで選んだ API（API-FOOTBALL か football-data.org）から取得する（タイマーが動いている間だけ）。
+//   API-FOOTBALL は1日100回なので80秒に1回、football-data.org は1分10回・1日の上限なしなので6秒に1回。手動の +1 / -1 も可能
 //   football-data.org はブラウザから直接呼べないので、同じフォルダの fd.php が中継する（キーは保存しない）
 // ・APIキーは既定ではこのページを開いている間だけメモリに持ち、どこにも保存しない
 //   （サイドバーの「このブラウザにキーを保存する」をオンにしたときだけ localStorage に保存する）
 
 const API_BASE = "https://v3.football.api-sports.io";
-const SYNC_INTERVAL_SEC = 80;
+const SYNC_INTERVAL_SEC = { af: 80, fd: 6 };   // API ごとの取得間隔（秒）
 const DAILY_RESERVE = 2;          // 1日の上限からこの回数を残して自動同期を止める
 const STORAGE_KEY = "scoreboard-state"; // キー以外の表示状態だけを保存する
 const API_KEY_STORAGE = "scoreboard-api-key"; // 保存を選んだときだけ使う（表示状態とは別に持つ）
-const FD_KEY_STORAGE = "scoreboard-fd-key";   // 予備（football-data.org）のキー。同じく保存を選んだときだけ
+const FD_KEY_STORAGE = "scoreboard-fd-key";   // football-data.org のキー。同じく保存を選んだときだけ
 const FD_RELAY = "./fd.php";
 
 const $ = (id) => document.getElementById(id);
 
 let apiKey = "";
 let fdKey = "";
-let afDown = false;        // API-FOOTBALL が1日の上限に達したら、キーを入れ直すまで予備を使う
+let fdPauseUntil = 0;      // football-data.org の1分あたりの回数を使い切ったら、この時刻まで待つ
 let syncOn = false;
 let nextSyncAt = 0;
 let requestsUsed = null;
@@ -41,14 +41,40 @@ let state = {
 
 // ==== メニュー・テーマ（既存タイマーと同じ） ====
 function toggleMenu() {
-    $("menu").classList.toggle("open");
-    document.querySelector(".hamburger").classList.toggle("open");
+    const open = $("menu").classList.toggle("open");
+    document.querySelector(".hamburger").classList.toggle("open", open);
+    // 開いている間は、下部の操作バーをサイドバーの右に寄せる（スタートなどが隠れないように）
+    document.body.classList.toggle("menu-open", open);
+}
+
+// サイドバーの外をクリックしたら閉じる（押したボタンの操作もそのまま行う）。試合選択画面の中は除く
+document.addEventListener("click", (e) => {
+    if (!$("menu").classList.contains("open")) return;
+    if (e.target.closest("#menu, .hamburger, #picker")) return;
+    toggleMenu();
+});
+
+// メニューのボタンの右に ON / OFF のスイッチを付ける
+function setToggle(id, label, on) {
+    const btn = $(id);
+    btn.textContent = "";
+    const text = document.createElement("span");
+    text.textContent = label;
+    const sw = document.createElement("span");
+    sw.className = "switch" + (on ? " on" : "");
+    btn.append(text, sw);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
 }
 
 function toggleTheme() {
     document.body.classList.toggle("dark-mode");
     state.darkMode = document.body.classList.contains("dark-mode");
     saveState();
+    renderTheme();
+}
+
+function renderTheme() {
+    setToggle("theme-button", "背景を黒にする", !!state.darkMode);
 }
 
 // 下部の操作バー（配信に映したくないときは隠せる）
@@ -60,7 +86,7 @@ function toggleBar() {
 
 function renderBar() {
     document.body.classList.toggle("hide-bar", !!state.hideBar);
-    $("bar-button").textContent = state.hideBar ? "下部の操作バー [ 非表示 ]" : "下部の操作バー [ 表示 ]";
+    setToggle("bar-button", "下部の操作バー", !state.hideBar);
 }
 
 function toggleLogo() {
@@ -71,7 +97,7 @@ function toggleLogo() {
 
 function renderLogo() {
     document.body.classList.toggle("show-logo", !!state.showLogo);
-    $("logo-button").textContent = state.showLogo ? "ロゴ表示 [ ON ]" : "ロゴ表示 [ OFF ]";
+    setToggle("logo-button", "ロゴ表示", !!state.showLogo);
 }
 
 // ==== 保存・読み込み ====
@@ -124,25 +150,21 @@ function renderTimer() {
     }
     $("half-label").textContent = state.half === 2 ? "後半" : "前半";
 
-    const pauseBtn = $("pause-button");
-    const started = isRunning() || state.baseSeconds > 0;
-    pauseBtn.disabled = !started;
-    pauseBtn.textContent = (isRunning() || !started) ? "一時停止" : "再開";
+    // スタート・一時停止は1つのボタン。動いていれば「一時停止」、止まっていれば「スタート」か「再開」
+    const btn = $("start-button");
+    const running = isRunning();
+    // 前半 00:00・後半 45:00 ちょうど（キックオフ前）は「スタート」、途中で止めたときは「再開」
+    const atKickoff = state.baseSeconds === 0 || (state.half === 2 && state.baseSeconds === 45 * 60);
+    btn.textContent = running ? "一時停止" : (atKickoff ? "スタート" : "再開");
+    btn.classList.toggle("is-running", running);
 }
 
 $("start-button").addEventListener("click", () => {
-    state.baseSeconds = currentSeconds();
-    state.startedAt = Date.now();
-    scheduleSyncAfterStart();
-    saveState();
-    renderTimer();
-});
-
-$("pause-button").addEventListener("click", () => {
     if (isRunning()) {
         state.baseSeconds = currentSeconds();
         state.startedAt = null;
     } else {
+        state.baseSeconds = currentSeconds();
         state.startedAt = Date.now();
         scheduleSyncAfterStart();
     }
@@ -344,10 +366,42 @@ function readFdKey() {
     return fdKey !== "";
 }
 
-// API-FOOTBALL を使えるか（キーがあり、1日の上限に達していない）
-function afUsable() {
-    return readApiKey() && !afDown && !nearDailyLimit();
+// ==== 使う API の切り替え（"af" = API-FOOTBALL / "fd" = football-data.org） ====
+const PROVIDER_NAME = { af: "API-FOOTBALL", fd: "football-data.org" };
+
+function provider() {
+    return state.provider === "fd" ? "fd" : "af";
 }
+
+function readProviderKey() {
+    return provider() === "fd" ? readFdKey() : readApiKey();
+}
+
+function syncIntervalMs() {
+    return SYNC_INTERVAL_SEC[provider()] * 1000;
+}
+
+function renderProvider() {
+    const p = provider();
+    document.querySelectorAll("[data-provider]").forEach(b => b.classList.toggle("selected", b.dataset.provider === p));
+    // 選んだ API のキー欄だけ出す
+    $("api-key").style.display = p === "af" ? "" : "none";
+    $("fd-key").style.display = p === "fd" ? "" : "none";
+    $("sync-button").title = `ON の間、タイマーが動いているときだけ ${SYNC_INTERVAL_SEC[p]}秒ごとにスコアを取得します`;
+}
+
+document.querySelectorAll("[data-provider]").forEach(b => {
+    b.addEventListener("click", () => {
+        if (b.dataset.provider === provider()) return;
+        state.provider = b.dataset.provider;
+        saveState();
+        if (syncOn) {
+            stopSync();
+            setStatus(`使う API を ${PROVIDER_NAME[provider()]} に変えたため、自動同期を止めました。`);
+        }
+        renderProvider();
+    });
+});
 
 // ==== APIキーの保存（選んだ人だけ。2つのキーとも同じチェックで保存する） ====
 const KEY_FIELDS = [["api-key", API_KEY_STORAGE], ["fd-key", FD_KEY_STORAGE]];
@@ -380,7 +434,6 @@ function loadSavedApiKey() {
 $("api-key-save").addEventListener("change", saveApiKeyIfChosen);
 KEY_FIELDS.forEach(([id]) => {
     $(id).addEventListener("input", () => {
-        if (id === "api-key") afDown = false;   // キーを入れ直したら API-FOOTBALL をもう一度試す
         if ($("api-key-save").checked) saveApiKeyIfChosen();
     });
 });
@@ -478,8 +531,8 @@ async function fetchDay(dateStr, tz) {
     return list;
 }
 
-// ==== 予備: football-data.org（fd.php 経由） ====
-// 無料プランは1分10回まで・1日の上限なし。ただしスコアは少し遅れて届く
+// ==== football-data.org（fd.php 経由） ====
+// 無料プランは1分10回まで・1日の上限なし。ただしスコアは遅れて届く（公式に分数の記載なし）
 const FD_COMPETITIONS = { PL: 39, PD: 140, CL: 2 };   // football-data.org の大会コード → API-FOOTBALL の大会番号
 const FD_CODE_OF = { 39: "PL", 140: "PD", 2: "CL" };
 // football-data.org の状態を API-FOOTBALL の表記にそろえる（一覧の表示を共通にするため）
@@ -491,10 +544,10 @@ const fdCache = {};
 
 function fdErrorText(status, data) {
     const msg = (data && data.message) || "";
-    if ((status === 400 || status === 403) && /token/i.test(msg)) return "予備APIのキーが正しくありません";
-    if (status === 403) return "予備APIの無料プランでは使えないデータです";
-    if (status === 429) return "予備APIの回数制限（1分10回）に達しました。少し待ってください";
-    return msg || `予備APIでエラー（${status}）`;
+    if ((status === 400 || status === 403) && /token/i.test(msg)) return "football-data.org のキーが正しくありません";
+    if (status === 403) return "football-data.org の無料プランでは使えないデータです";
+    if (status === 429) return "football-data.org の回数制限（1分10回）に達しました";
+    return msg || `football-data.org でエラー（${status}）`;
 }
 
 async function callFd(path, params) {
@@ -503,11 +556,19 @@ async function callFd(path, params) {
     try {
         res = await fetch(`${FD_RELAY}?${q}`, { headers: { "X-FD-Key": fdKey }, cache: "no-store" });
     } catch (e) {
-        throw new Error("予備APIの中継（fd.php）と通信できません");
+        throw new Error("football-data.org の中継（fd.php）と通信できません");
     }
+    // 1分あたりの残り回数を使い切ったら、回数が戻るまで次の取得を待つ
+    const left = res.headers.get("X-FD-Available-Minute");
+    const reset = Number(res.headers.get("X-FD-Reset")) || 60;
+    if (res.status === 429 || left === "0") fdPauseUntil = Date.now() + reset * 1000;
     let data = null;
     try { data = await res.json(); } catch (e) { }
-    if (!res.ok || !data) throw new Error(fdErrorText(res.status, data));
+    if (!res.ok || !data) {
+        const err = new Error(fdErrorText(res.status, data));
+        err.rateLimited = res.status === 429;
+        throw err;
+    }
     return data;
 }
 
@@ -581,9 +642,9 @@ function setPickerMessage(text, isError) {
 
 function openPicker() {
     $("picker").classList.add("open");
-    if (!readApiKey() && !readFdKey()) {
+    if (!readProviderKey()) {
         $("picker-list").innerHTML = "";
-        setPickerMessage("先にサイドバーで APIキーを入力してください。", true);
+        setPickerMessage(`先にサイドバーで ${PROVIDER_NAME[provider()]} のキーを入力してください。`, true);
         return;
     }
     loadPicker();
@@ -607,11 +668,11 @@ function movePickerDay(n) {
 async function loadPicker() {
     $("picker-next24").classList.toggle("selected", pickerMode === "next24");
     $("picker-date").textContent = pickerMode === "next24" ? "" : formatDate(pickerMode);
-    const hasFd = readFdKey();
-    if (!afUsable()) {
-        if (hasFd) return loadPickerFd(readApiKey() ? "API-FOOTBALL が本日の上限のため" : "");
-        if (!readApiKey()) return;
+    if (provider() === "fd") {
+        if (readFdKey()) loadPickerFd();
+        return;
     }
+    if (!readApiKey()) return;
 
     const now = Date.now();
     let dates, tz;
@@ -646,9 +707,6 @@ async function loadPicker() {
         setPickerMessage(usageText());
         renderPickerList();
     } catch (e) {
-        if (/request limit/i.test(e.message)) afDown = true;
-        // API-FOOTBALL で取れなければ予備で取り直す
-        if (hasFd) return loadPickerFd(`API-FOOTBALL でエラー（${e.message}）のため`);
         // 前に表示していた別の日の一覧が残らないように消す
         pickerFixtures = [];
         $("picker-list").innerHTML = "";
@@ -656,8 +714,8 @@ async function loadPicker() {
     }
 }
 
-// 予備（football-data.org）で一覧を作る。reason は切り替えた理由（予備だけ使うときは空）
-async function loadPickerFd(reason) {
+// football-data.org で一覧を作る
+async function loadPickerFd() {
     const now = Date.now();
     const nowSec = Math.floor(now / 1000);
     let from, to;
@@ -669,7 +727,7 @@ async function loadPickerFd(reason) {
         from = addDays(pickerMode, -1);
         to = pickerMode;
     }
-    const note = `予備の football-data.org で表示中${reason ? `（${reason}）` : ""}`;
+    const note = "football-data.org の一覧（1分10回まで）";
     setPickerMessage(`読み込み中…（${note}）`);
     try {
         let list = await fetchFdRange(from, to);
@@ -831,39 +889,42 @@ function renderSelectedMatch() {
         home: f.home, away: f.away,
         homeLogo: f.homeLogo || state.homeLogo, awayLogo: f.awayLogo || state.awayLogo,
         center: "vs",
-        sub: `${formatKickoff(f.timestamp)}・${LEAGUES[f.leagueId] || ""}${f.provider === "fd" ? "（予備API）" : ""}`
+        sub: `${formatKickoff(f.timestamp)}・${LEAGUES[f.leagueId] || ""}（${PROVIDER_NAME[f.provider === "fd" ? "fd" : "af"]}）`
     });
 }
 
 // ==== スコアの自動同期（選んだ試合を、タイマーが動いている間だけ取得） ====
-// 使う API を決めて取得する。API-FOOTBALL で選んだ試合でも、上限・エラーのときは予備に切り替える
-let syncNote = "";   // 予備で取得しているときの説明（メニューに出す）
+// サイドバーで選んだ API から取得する
+let syncNote = "";   // football-data.org で取得しているときの説明（メニューに出す）
 
 async function syncScore() {
-    const fixture = state.fixture;
-    const hasFd = readFdKey();
-    if (fixture.provider !== "fd") {
-        if (afUsable()) {
-            try {
-                await syncScoreAf();
-                syncNote = "";
-                return;
-            } catch (e) {
-                if (/request limit/i.test(e.message)) afDown = true;
-                if (!hasFd) throw e;
-                syncNote = `API-FOOTBALL でエラー（${e.message}）のため予備で取得`;
-            }
-        } else if (!hasFd) {
-            stopSync();
-            setStatus(`本日の上限に近いため自動同期を止めました（${usageText()}）。手動で調整してください。`, true);
-            return;
-        } else {
-            syncNote = "API-FOOTBALL が本日の上限のため予備で取得";
-        }
-    } else {
-        syncNote = "予備の football-data.org で取得";
+    if (provider() === "fd") {
+        syncNote = "football-data.org で取得";
+        await syncScoreFd();
+        return;
     }
-    await syncScoreFd();
+    syncNote = "";
+    if (nearDailyLimit()) {
+        stopSync();
+        setStatus(`本日の上限に近いため自動同期を止めました（${usageText()}）。手動で調整してください。`, true);
+        return;
+    }
+    await syncScoreAf();
+}
+
+// スコアが変わった時刻の記録（API ごとの遅れを確かめるため。新しい順に最大8件）
+const scoreLog = [];
+
+function clockText(ms) {
+    const d = new Date(ms + JST_OFFSET_MS);
+    return [d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()].map(n => String(n).padStart(2, "0")).join(":");
+}
+
+function addScoreLog(m) {
+    const updated = m.updatedAt ? `（データ更新 ${clockText(m.updatedAt)}）` : "";
+    scoreLog.unshift(`${clockText(Date.now())} 取得 ${m.homeGoals}-${m.awayGoals}${updated}`);
+    scoreLog.length = Math.min(scoreLog.length, 8);
+    $("api-log").textContent = "スコアが変わった時刻\n" + scoreLog.join("\n");
 }
 
 // 取得したスコアを表示に反映する（API ごとの違いは呼び出し側でそろえる）
@@ -881,6 +942,7 @@ function applyApiScore(m) {
 
     // API のスコアが変わったときだけ反映（手動で直した値を、古い API の値で戻さないため）
     if (m.homeGoals !== state.lastApiHome || m.awayGoals !== state.lastApiAway) {
+        addScoreLog(m);
         state.homeScore = m.homeGoals;
         state.awayScore = m.awayGoals;
         state.lastApiHome = m.homeGoals;
@@ -922,24 +984,27 @@ const FD_STATUS_LABEL = {
 async function syncScoreFd() {
     const id = await findFdMatchId(state.fixture);
     if (!id) {
-        renderMatchBox($("api-match"), "予備API: 対応する試合が見つかりません");
+        renderMatchBox($("api-match"), "football-data.org: 対応する試合が見つかりません");
         setStatus(syncNote);
         return;
     }
     const m = await callFd(`matches/${id}`);
     // 試合中・終了のときだけスコアを反映する（開始前は 0-0 を入れない）
     if (!["IN_PLAY", "PAUSED", "FINISHED"].includes(m.status)) {
-        renderMatchBox($("api-match"), `予備API: ${FD_STATUS_LABEL[m.status] || m.status}`);
+        renderMatchBox($("api-match"), `football-data.org: ${FD_STATUS_LABEL[m.status] || m.status}`);
         setStatus(syncNote);
         return;
     }
     const ft = (m.score && m.score.fullTime) || {};
     const minute = m.minute ? ` ${m.minute}分` : "";
+    const updatedAt = m.lastUpdated ? Date.parse(m.lastUpdated) : null;
     applyApiScore({
         home: m.homeTeam.shortName || m.homeTeam.name, away: m.awayTeam.shortName || m.awayTeam.name,
         homeLogo: m.homeTeam.crest, awayLogo: m.awayTeam.crest,
         homeGoals: ft.home ?? 0, awayGoals: ft.away ?? 0,
-        label: `予備API: ${FD_STATUS_LABEL[m.status] || m.status}${minute}（少し遅れて届きます）`
+        updatedAt,
+        label: `football-data.org: ${FD_STATUS_LABEL[m.status] || m.status}${minute}` +
+            (updatedAt ? `・データ更新 ${clockText(updatedAt)}` : "")
     });
     setStatus(syncNote);
 }
@@ -948,45 +1013,46 @@ async function runSync() {
     try {
         await syncScore();
     } catch (e) {
-        stopSync();
-        setStatus(`エラーのため自動同期を止めました: ${e.message}`, true);
-        return;
+        // football-data.org の1分あたりの回数切れは、止めずに回数が戻るまで待つ
+        if (!e.rateLimited) {
+            stopSync();
+            setStatus(`エラーのため自動同期を止めました: ${e.message}`, true);
+            return;
+        }
+        syncNote = `${e.message}。回数が戻るまで待ちます`;
     }
-    if (syncOn) nextSyncAt = Date.now() + SYNC_INTERVAL_SEC * 1000;
+    if (syncOn) nextSyncAt = Math.max(Date.now() + syncIntervalMs(), fdPauseUntil);
 }
 
 async function startSync() {
-    const hasAf = readApiKey();
-    const hasFd = readFdKey();
-    if (!hasAf && !hasFd) {
-        setStatus("APIキーを入力してください。", true);
+    const p = provider();
+    if (!readProviderKey()) {
+        setStatus(`${PROVIDER_NAME[p]} のキーを入力してください。`, true);
         return;
     }
     if (!state.fixture) {
         setStatus("先に「試合を選ぶ」で試合を選んでください。", true);
         return;
     }
-    if (state.fixture.provider === "fd" && !hasFd) {
-        setStatus("予備の football-data.org で選んだ試合です。予備のキーを入力してください。", true);
+    // football-data.org で選んだ試合は API-FOOTBALL では取れない（逆は時刻とチーム名で探せる）
+    if (p === "af" && state.fixture.provider === "fd") {
+        setStatus("football-data.org で選んだ試合です。API-FOOTBALL で使うときは、試合を選び直してください。", true);
         return;
     }
 
-    // API-FOOTBALL のキーは使用回数の確認で確かめる（予備があれば、確認できなくても予備で続ける）
-    if (hasAf && state.fixture.provider !== "fd") {
+    if (p === "af") {
+        // API-FOOTBALL のキーは使用回数の確認で確かめる
         try {
             await checkStatus();
         } catch (e) {
-            if (!hasFd) {
-                setStatus(`キーを確認できませんでした（${e.message}）`, true);
-                return;
-            }
+            setStatus(`キーを確認できませんでした（${e.message}）`, true);
+            return;
         }
     }
 
     syncOn = true;
     nextSyncAt = 0;   // タイマーが動いていればすぐ1回取得する
-    const fdOnly = state.fixture.provider === "fd" || !hasAf;
-    syncNote = fdOnly ? "予備の football-data.org で取得" : "";
+    syncNote = p === "fd" ? "football-data.org で取得" : "";
     setStatus(syncNote || usageText());
     renderSyncButton();
 }
@@ -996,10 +1062,10 @@ function stopSync() {
     renderSyncButton();
 }
 
-// タイマーを動かし始めたとき（キックオフ・後半開始・再開）は、80秒後から取得を始める
+// タイマーを動かし始めたとき（キックオフ・後半開始・再開）は、1回分の間隔をあけてから取得を始める
 function scheduleSyncAfterStart() {
     if (syncOn && isFinite(nextSyncAt)) {
-        nextSyncAt = Math.max(nextSyncAt, Date.now() + SYNC_INTERVAL_SEC * 1000);
+        nextSyncAt = Math.max(nextSyncAt, Date.now() + syncIntervalMs());
     }
 }
 
@@ -1007,7 +1073,7 @@ function scheduleSyncAfterStart() {
 function syncTick() {
     if (!syncOn) return;
     if (!isRunning()) {
-        $("bar-sync").textContent = "API: 待機中（タイマー停止中は取得しません）";
+        renderSyncMeter("wait", "API: 待機中", "タイマー停止中は取得しません");
         return;
     }
     if (Date.now() >= nextSyncAt) {
@@ -1017,8 +1083,10 @@ function syncTick() {
 }
 
 function renderSyncButton() {
-    $("sync-button").textContent = syncOn ? "自動同期 [ ON ]" : "自動同期 [ OFF ]";
-    if (!syncOn) $("bar-sync").textContent = "API: OFF";
+    setToggle("sync-button", "自動同期", syncOn);
+    if (!syncOn) {
+        renderSyncMeter("off", "API: OFF", "自動同期は OFF です");
+    }
 }
 
 $("sync-button").addEventListener("click", () => {
@@ -1032,10 +1100,41 @@ $("sync-button").addEventListener("click", () => {
 
 // 次回更新までの秒数を表示
 function renderCountdown() {
-    if (!syncOn || !isRunning() || !isFinite(nextSyncAt) || nextSyncAt === 0) return;
-    const sec = Math.max(0, Math.ceil((nextSyncAt - Date.now()) / 1000));
+    if (!syncOn || !isRunning() || nextSyncAt === 0) return;
+    // 取得中（次回の時刻がまだ決まっていない）は、メーターを満タンにして「…」
+    if (!isFinite(nextSyncAt)) {
+        renderSyncMeter("busy", "API: 取得中", "スコアを取得しています", 1, "…");
+        return;
+    }
+    const left = Math.max(0, nextSyncAt - Date.now());
+    const sec = Math.ceil(left / 1000);
     setStatus([syncNote || usageText(), `次回 ${sec}秒`].filter(Boolean).join("・"));
-    $("bar-sync").textContent = `API: ON（次回 ${sec}秒）`;
+    // 1秒後の位置を目標にして、1秒かけてなめらかに増やす
+    const progress = 1 - Math.max(0, left - 1000) / syncIntervalMs();
+    renderSyncMeter("on", "API: ON", `次の取得まで ${sec}秒`, progress, String(sec));
+}
+
+// 下部バーの円メーター: 次の取得までの時間で円が増えていき、中央に残り秒数を出す
+const RING_LENGTH = 2 * Math.PI * 15.5;
+let ringProgress = 0;
+
+function renderSyncMeter(mode, label, title, progress, center) {
+    const box = $("bar-sync");
+    const fg = $("sync-ring-fg");
+    const p = Math.min(1, Math.max(0, progress || 0));
+    // 減るとき（取得して0に戻るとき）は、いったんアニメーションなしで空にしてから増やし直す
+    if (p < ringProgress) {
+        fg.classList.add("no-anim");
+        fg.style.strokeDashoffset = String(RING_LENGTH);
+        fg.getBoundingClientRect();   // 空の状態を先に描かせる
+        fg.classList.remove("no-anim");
+    }
+    fg.style.strokeDashoffset = String(RING_LENGTH * (1 - p));
+    ringProgress = p;
+    box.dataset.state = mode;
+    box.title = title;
+    $("sync-ring-num").textContent = center || (mode === "wait" ? "II" : "-");
+    $("sync-label").textContent = label;
 }
 
 // ==== パーツの配置（移動・大きさ変更・保存） ====
@@ -1211,7 +1310,10 @@ document.addEventListener("mouseup", () => {
 // ==== 起動 ====
 loadState();
 loadSavedApiKey();
+renderProvider();
 if (state.darkMode) document.body.classList.add("dark-mode");
+renderTheme();
+renderSyncButton();
 renderSelectedMatch();
 renderLogo();
 renderBar();
