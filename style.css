@@ -224,7 +224,8 @@ button {
     box-sizing: border-box;
 }
 
-#api-key {
+#api-key,
+#fd-key {
     display: block;
     width: calc(100% - 60px);
     margin: 4px 30px 6px;

@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <title>スコアボード</title>
-  <link rel="stylesheet" href="./style.css?v=24">
+  <link rel="stylesheet" href="./style.css?v=25">
 </head>
 
 <body>
@@ -24,7 +24,8 @@
     <button id="bar-button" onclick="toggleBar()">下部の操作バー [ 表示 ]</button>
 
     <div class="menu-title">API自動同期</div>
-    <input type="password" id="api-key" placeholder="APIキーを入力" autocomplete="off" spellcheck="false">
+    <input type="password" id="api-key" placeholder="API-FOOTBALL のキー" autocomplete="off" spellcheck="false">
+    <input type="password" id="fd-key" placeholder="予備: football-data.org のキー（任意）" autocomplete="off" spellcheck="false" title="API-FOOTBALL が1日の上限やエラーのときに使います。スコアは少し遅れて届きます">
     <label class="menu-check" title="オンにすると、次に開いたときもキーが入った状態になります。共用のパソコンではオフのままにしてください"><input type="checkbox" id="api-key-save"> このブラウザにキーを保存する</label>
     <button id="picker-button" onclick="openPicker()">試合を選ぶ</button>
     <div id="selected-match" class="menu-match">試合: 未選択</div>
@@ -128,7 +129,7 @@
     <div class="resizer" data-target="part-score"></div>
   </div>
 
-  <script src="./scoreboard.js?v=24"></script>
+  <script src="./scoreboard.js?v=25"></script>
 </body>
 
 </html>

@@ -1,6 +1,8 @@
 // サッカー配信用スコアボード
 // ・タイマーはブラウザ側で1秒ごとに表示を更新（開始時刻を基準に計算するので、再読み込みしてもずれない）
 // ・スコアは API-FOOTBALL から、選んだ試合を約80秒に1回取得（タイマーが動いている間だけ）。手動の +1 / -1 も可能
+// ・予備として football-data.org も使える（キーを入れたときだけ）。API-FOOTBALL が上限・エラーのときに切り替える。
+//   football-data.org はブラウザから直接呼べないので、同じフォルダの fd.php が中継する（キーは保存しない）
 // ・APIキーは既定ではこのページを開いている間だけメモリに持ち、どこにも保存しない
 //   （サイドバーの「このブラウザにキーを保存する」をオンにしたときだけ localStorage に保存する）
 
@@ -9,10 +11,14 @@ const SYNC_INTERVAL_SEC = 80;
 const DAILY_RESERVE = 2;          // 1日の上限からこの回数を残して自動同期を止める
 const STORAGE_KEY = "scoreboard-state"; // キー以外の表示状態だけを保存する
 const API_KEY_STORAGE = "scoreboard-api-key"; // 保存を選んだときだけ使う（表示状態とは別に持つ）
+const FD_KEY_STORAGE = "scoreboard-fd-key";   // 予備（football-data.org）のキー。同じく保存を選んだときだけ
+const FD_RELAY = "./fd.php";
 
 const $ = (id) => document.getElementById(id);
 
 let apiKey = "";
+let fdKey = "";
+let afDown = false;        // API-FOOTBALL が1日の上限に達したら、キーを入れ直すまで予備を使う
 let syncOn = false;
 let nextSyncAt = 0;
 let requestsUsed = null;
@@ -333,31 +339,50 @@ function readApiKey() {
     return apiKey !== "";
 }
 
-// ==== APIキーの保存（選んだ人だけ） ====
+function readFdKey() {
+    fdKey = $("fd-key").value.trim();
+    return fdKey !== "";
+}
+
+// API-FOOTBALL を使えるか（キーがあり、1日の上限に達していない）
+function afUsable() {
+    return readApiKey() && !afDown && !nearDailyLimit();
+}
+
+// ==== APIキーの保存（選んだ人だけ。2つのキーとも同じチェックで保存する） ====
+const KEY_FIELDS = [["api-key", API_KEY_STORAGE], ["fd-key", FD_KEY_STORAGE]];
+
 function saveApiKeyIfChosen() {
-    try {
-        const key = $("api-key").value.trim();
-        if ($("api-key-save").checked && key !== "") {
-            localStorage.setItem(API_KEY_STORAGE, key);
-        } else {
-            localStorage.removeItem(API_KEY_STORAGE);
-        }
-    } catch (e) { }
+    KEY_FIELDS.forEach(([id, storageKey]) => {
+        try {
+            const key = $(id).value.trim();
+            if ($("api-key-save").checked && key !== "") {
+                localStorage.setItem(storageKey, key);
+            } else {
+                localStorage.removeItem(storageKey);
+            }
+        } catch (e) { }
+    });
 }
 
 function loadSavedApiKey() {
-    try {
-        const key = localStorage.getItem(API_KEY_STORAGE);
-        if (key) {
-            $("api-key").value = key;
-            $("api-key-save").checked = true;
-        }
-    } catch (e) { }
+    KEY_FIELDS.forEach(([id, storageKey]) => {
+        try {
+            const key = localStorage.getItem(storageKey);
+            if (key) {
+                $(id).value = key;
+                $("api-key-save").checked = true;
+            }
+        } catch (e) { }
+    });
 }
 
 $("api-key-save").addEventListener("change", saveApiKeyIfChosen);
-$("api-key").addEventListener("input", () => {
-    if ($("api-key-save").checked) saveApiKeyIfChosen();
+KEY_FIELDS.forEach(([id]) => {
+    $(id).addEventListener("input", () => {
+        if (id === "api-key") afDown = false;   // キーを入れ直したら API-FOOTBALL をもう一度試す
+        if ($("api-key-save").checked) saveApiKeyIfChosen();
+    });
 });
 
 function nearDailyLimit() {
@@ -453,6 +478,101 @@ async function fetchDay(dateStr, tz) {
     return list;
 }
 
+// ==== 予備: football-data.org（fd.php 経由） ====
+// 無料プランは1分10回まで・1日の上限なし。ただしスコアは少し遅れて届く
+const FD_COMPETITIONS = { PL: 39, PD: 140, CL: 2 };   // football-data.org の大会コード → API-FOOTBALL の大会番号
+const FD_CODE_OF = { 39: "PL", 140: "PD", 2: "CL" };
+// football-data.org の状態を API-FOOTBALL の表記にそろえる（一覧の表示を共通にするため）
+const FD_STATUS = {
+    SCHEDULED: "NS", TIMED: "NS", IN_PLAY: "LIVE", PAUSED: "HT", FINISHED: "FT",
+    SUSPENDED: "SUSP", POSTPONED: "PST", CANCELLED: "CANC", AWARDED: "AWD"
+};
+const fdCache = {};
+
+function fdErrorText(status, data) {
+    const msg = (data && data.message) || "";
+    if ((status === 400 || status === 403) && /token/i.test(msg)) return "予備APIのキーが正しくありません";
+    if (status === 403) return "予備APIの無料プランでは使えないデータです";
+    if (status === 429) return "予備APIの回数制限（1分10回）に達しました。少し待ってください";
+    return msg || `予備APIでエラー（${status}）`;
+}
+
+async function callFd(path, params) {
+    const q = new URLSearchParams(Object.assign({ path }, params || {}));
+    let res;
+    try {
+        res = await fetch(`${FD_RELAY}?${q}`, { headers: { "X-FD-Key": fdKey }, cache: "no-store" });
+    } catch (e) {
+        throw new Error("予備APIの中継（fd.php）と通信できません");
+    }
+    let data = null;
+    try { data = await res.json(); } catch (e) { }
+    if (!res.ok || !data) throw new Error(fdErrorText(res.status, data));
+    return data;
+}
+
+function fdToFixture(m) {
+    return {
+        provider: "fd",
+        id: m.id,
+        timestamp: Math.floor(Date.parse(m.utcDate) / 1000),
+        status: FD_STATUS[m.status] || m.status,
+        leagueId: FD_COMPETITIONS[m.competition && m.competition.code],
+        home: m.homeTeam.shortName || m.homeTeam.name || "HOME",
+        away: m.awayTeam.shortName || m.awayTeam.name || "AWAY",
+        homeId: m.homeTeam.id,
+        awayId: m.awayTeam.id,
+        homeCode: m.homeTeam.tla,
+        awayCode: m.awayTeam.tla,
+        homeLogo: m.homeTeam.crest || "",
+        awayLogo: m.awayTeam.crest || ""
+    };
+}
+
+// UTC の日付の範囲（両端を含む）で3大会の試合を取得する
+async function fetchFdRange(from, to, competitions) {
+    const comps = competitions || Object.keys(FD_COMPETITIONS).join(",");
+    const key = `${from}|${to}|${comps}`;
+    const c = fdCache[key];
+    if (c && Date.now() - c.at < CACHE_TTL_MS) return c.list;
+    // dateTo の日を確実に含めるよう1日先まで取り、あとで時刻で絞る
+    const data = await callFd("matches", { competitions: comps, dateFrom: from, dateTo: addDays(to, 1) });
+    const list = (data.matches || []).map(fdToFixture).filter(f => f.leagueId);
+    fdCache[key] = { at: Date.now(), list };
+    return list;
+}
+
+// チーム名を比べやすくする（記号・アクセント・FC などを除く）
+function nameWords(name) {
+    return (name || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
+        .replace(/[^a-z0-9 ]/g, " ").split(/\s+/)
+        .filter(w => w.length > 1 && !["fc", "cf", "afc", "sc", "ac", "club", "de", "the"].includes(w));
+}
+
+function nameMatchScore(a, b) {
+    const wa = nameWords(a), wb = nameWords(b);
+    return wa.filter(w => wb.some(x => x.startsWith(w) || w.startsWith(x))).length;
+}
+
+// API-FOOTBALL で選んだ試合に対応する football-data.org の試合を探す（キックオフ時刻とチーム名で照合）
+async function findFdMatchId(f) {
+    if (f.provider === "fd") return f.id;
+    if (f.fdId) return f.fdId;
+    const comp = FD_CODE_OF[f.leagueId];
+    if (!comp) return null;
+    const day = utcDate(f.timestamp * 1000);
+    const list = await fetchFdRange(day, day, comp);
+    let best = null, bestScore = 0;
+    list.filter(m => Math.abs(m.timestamp - f.timestamp) <= 30 * 60).forEach(m => {
+        const score = nameMatchScore(f.home, m.home) + nameMatchScore(f.away, m.away);
+        if (score > bestScore) { best = m; bestScore = score; }
+    });
+    if (!best) return null;
+    f.fdId = best.id;
+    saveState();
+    return best.id;
+}
+
 function setPickerMessage(text, isError) {
     const el = $("picker-message");
     el.textContent = text;
@@ -461,7 +581,7 @@ function setPickerMessage(text, isError) {
 
 function openPicker() {
     $("picker").classList.add("open");
-    if (!readApiKey()) {
+    if (!readApiKey() && !readFdKey()) {
         $("picker-list").innerHTML = "";
         setPickerMessage("先にサイドバーで APIキーを入力してください。", true);
         return;
@@ -487,7 +607,11 @@ function movePickerDay(n) {
 async function loadPicker() {
     $("picker-next24").classList.toggle("selected", pickerMode === "next24");
     $("picker-date").textContent = pickerMode === "next24" ? "" : formatDate(pickerMode);
-    if (!readApiKey()) return;
+    const hasFd = readFdKey();
+    if (!afUsable()) {
+        if (hasFd) return loadPickerFd(readApiKey() ? "API-FOOTBALL が本日の上限のため" : "");
+        if (!readApiKey()) return;
+    }
 
     const now = Date.now();
     let dates, tz;
@@ -522,7 +646,42 @@ async function loadPicker() {
         setPickerMessage(usageText());
         renderPickerList();
     } catch (e) {
+        if (/request limit/i.test(e.message)) afDown = true;
+        // API-FOOTBALL で取れなければ予備で取り直す
+        if (hasFd) return loadPickerFd(`API-FOOTBALL でエラー（${e.message}）のため`);
         // 前に表示していた別の日の一覧が残らないように消す
+        pickerFixtures = [];
+        $("picker-list").innerHTML = "";
+        setPickerMessage(`試合一覧を取得できませんでした（${e.message}）`, true);
+    }
+}
+
+// 予備（football-data.org）で一覧を作る。reason は切り替えた理由（予備だけ使うときは空）
+async function loadPickerFd(reason) {
+    const now = Date.now();
+    const nowSec = Math.floor(now / 1000);
+    let from, to;
+    if (pickerMode === "next24") {
+        from = utcDate(now - PAST_WINDOW_SEC * 1000);
+        to = utcDate(now + NEXT_WINDOW_SEC * 1000);
+    } else {
+        // 日本時間のその日は、UTC では前日の15時〜当日の15時
+        from = addDays(pickerMode, -1);
+        to = pickerMode;
+    }
+    const note = `予備の football-data.org で表示中${reason ? `（${reason}）` : ""}`;
+    setPickerMessage(`読み込み中…（${note}）`);
+    try {
+        let list = await fetchFdRange(from, to);
+        if (pickerMode === "next24") {
+            list = list.filter(f => f.timestamp >= nowSec - PAST_WINDOW_SEC && f.timestamp < nowSec + NEXT_WINDOW_SEC);
+        } else {
+            list = list.filter(f => jstDate(f.timestamp * 1000) === pickerMode);
+        }
+        pickerFixtures = list.sort((a, b) => a.timestamp - b.timestamp);
+        setPickerMessage(note);
+        renderPickerList();
+    } catch (e) {
         pickerFixtures = [];
         $("picker-list").innerHTML = "";
         setPickerMessage(`試合一覧を取得できませんでした（${e.message}）`, true);
@@ -551,7 +710,9 @@ function renderPickerList() {
     items.forEach(f => {
         const btn = document.createElement("button");
         btn.className = "picker-item";
-        if (state.fixture && state.fixture.id === f.id) btn.classList.add("current");
+        if (state.fixture && state.fixture.id === f.id && (state.fixture.provider || "af") === (f.provider || "af")) {
+            btn.classList.add("current");
+        }
 
         const time = document.createElement("span");
         time.textContent = formatKickoff(f.timestamp);
@@ -604,12 +765,13 @@ async function fetchTeamCode(id, name) {
 // 試合を選んだら、チーム名（3文字）とロゴを一度だけ入れる（チーム名はあとから自由に書き換えられる）
 async function selectFixture(f) {
     state.fixture = {
+        provider: f.provider || "af",
         id: f.id, leagueId: f.leagueId, timestamp: f.timestamp,
         home: f.home, away: f.away, homeLogo: f.homeLogo, awayLogo: f.awayLogo
     };
     const known = state.teamCodes || {};
-    state.homeName = known[f.homeId] || fallbackCode(f.home);
-    state.awayName = known[f.awayId] || fallbackCode(f.away);
+    state.homeName = f.homeCode || known[f.homeId] || fallbackCode(f.home);
+    state.awayName = f.awayCode || known[f.awayId] || fallbackCode(f.away);
     state.homeLogo = f.homeLogo;
     state.awayLogo = f.awayLogo;
     state.homeScore = 0;
@@ -621,6 +783,8 @@ async function selectFixture(f) {
     renderSelectedMatch();
     renderMatchBox($("api-match"), "API: 未取得");
     closePicker();
+    // football-data.org の一覧には3文字表記が入っているので、追加の取得はしない
+    if (f.provider === "fd") return;
 
     // 正式な3文字表記を取得して差し替える（その間に配信者が名前を書き換えていたら上書きしない）
     const tempHome = state.homeName;
@@ -667,18 +831,66 @@ function renderSelectedMatch() {
         home: f.home, away: f.away,
         homeLogo: f.homeLogo || state.homeLogo, awayLogo: f.awayLogo || state.awayLogo,
         center: "vs",
-        sub: `${formatKickoff(f.timestamp)}・${LEAGUES[f.leagueId] || ""}`
+        sub: `${formatKickoff(f.timestamp)}・${LEAGUES[f.leagueId] || ""}${f.provider === "fd" ? "（予備API）" : ""}`
     });
 }
 
 // ==== スコアの自動同期（選んだ試合を、タイマーが動いている間だけ取得） ====
-async function syncScore() {
-    if (nearDailyLimit()) {
-        stopSync();
-        setStatus(`本日の上限に近いため自動同期を止めました（${usageText()}）。手動で調整してください。`, true);
-        return;
-    }
+// 使う API を決めて取得する。API-FOOTBALL で選んだ試合でも、上限・エラーのときは予備に切り替える
+let syncNote = "";   // 予備で取得しているときの説明（メニューに出す）
 
+async function syncScore() {
+    const fixture = state.fixture;
+    const hasFd = readFdKey();
+    if (fixture.provider !== "fd") {
+        if (afUsable()) {
+            try {
+                await syncScoreAf();
+                syncNote = "";
+                return;
+            } catch (e) {
+                if (/request limit/i.test(e.message)) afDown = true;
+                if (!hasFd) throw e;
+                syncNote = `API-FOOTBALL でエラー（${e.message}）のため予備で取得`;
+            }
+        } else if (!hasFd) {
+            stopSync();
+            setStatus(`本日の上限に近いため自動同期を止めました（${usageText()}）。手動で調整してください。`, true);
+            return;
+        } else {
+            syncNote = "API-FOOTBALL が本日の上限のため予備で取得";
+        }
+    } else {
+        syncNote = "予備の football-data.org で取得";
+    }
+    await syncScoreFd();
+}
+
+// 取得したスコアを表示に反映する（API ごとの違いは呼び出し側でそろえる）
+function applyApiScore(m) {
+    // チーム名は配信者が編集するので上書きしない。取得中の試合はメニューに簡単に表示して確認できるようにする
+    renderMatchBox($("api-match"), "", {
+        home: m.home, away: m.away,
+        homeLogo: m.homeLogo, awayLogo: m.awayLogo,
+        center: `${m.homeGoals} - ${m.awayGoals}`,
+        sub: m.label
+    });
+
+    if (m.homeLogo) state.homeLogo = m.homeLogo;
+    if (m.awayLogo) state.awayLogo = m.awayLogo;
+
+    // API のスコアが変わったときだけ反映（手動で直した値を、古い API の値で戻さないため）
+    if (m.homeGoals !== state.lastApiHome || m.awayGoals !== state.lastApiAway) {
+        state.homeScore = m.homeGoals;
+        state.awayScore = m.awayGoals;
+        state.lastApiHome = m.homeGoals;
+        state.lastApiAway = m.awayGoals;
+    }
+    saveState();
+    renderBoard();
+}
+
+async function syncScoreAf() {
     // 試合中の全試合を1回で取得し、その中から選んだ試合を探す
     const data = await callApi("/fixtures?live=all");
     if (requestsUsed !== null) requestsUsed++;
@@ -691,32 +903,45 @@ async function syncScore() {
         return;
     }
 
-    // チーム名は配信者が編集するので上書きしない。取得中の試合はメニューに簡単に表示して確認できるようにする
     const st = match.fixture.status;
     const apiMinute = st.elapsed !== null ? ` ${st.elapsed}分` : "";
-    renderMatchBox($("api-match"), "", {
+    applyApiScore({
         home: match.teams.home.name, away: match.teams.away.name,
         homeLogo: match.teams.home.logo, awayLogo: match.teams.away.logo,
-        center: `${match.goals.home ?? 0} - ${match.goals.away ?? 0}`,
-        sub: `API: ${STATUS_LABEL[st.short] || st.long}${apiMinute}`
+        homeGoals: match.goals.home ?? 0, awayGoals: match.goals.away ?? 0,
+        label: `API: ${STATUS_LABEL[st.short] || st.long}${apiMinute}`
     });
-
-    state.homeLogo = match.teams.home.logo;
-    state.awayLogo = match.teams.away.logo;
-
-    // API のスコアが変わったときだけ反映（手動で直した値を、古い API の値で戻さないため）
-    const apiHome = match.goals.home ?? 0;
-    const apiAway = match.goals.away ?? 0;
-    if (apiHome !== state.lastApiHome || apiAway !== state.lastApiAway) {
-        state.homeScore = apiHome;
-        state.awayScore = apiAway;
-        state.lastApiHome = apiHome;
-        state.lastApiAway = apiAway;
-    }
-    saveState();
-    renderBoard();
-
     setStatus(usageText());
+}
+
+const FD_STATUS_LABEL = {
+    SCHEDULED: "開始前", TIMED: "開始前", IN_PLAY: "試合中", PAUSED: "ハーフタイム", FINISHED: "終了",
+    SUSPENDED: "中断", POSTPONED: "延期", CANCELLED: "中止", AWARDED: "没収"
+};
+
+async function syncScoreFd() {
+    const id = await findFdMatchId(state.fixture);
+    if (!id) {
+        renderMatchBox($("api-match"), "予備API: 対応する試合が見つかりません");
+        setStatus(syncNote);
+        return;
+    }
+    const m = await callFd(`matches/${id}`);
+    // 試合中・終了のときだけスコアを反映する（開始前は 0-0 を入れない）
+    if (!["IN_PLAY", "PAUSED", "FINISHED"].includes(m.status)) {
+        renderMatchBox($("api-match"), `予備API: ${FD_STATUS_LABEL[m.status] || m.status}`);
+        setStatus(syncNote);
+        return;
+    }
+    const ft = (m.score && m.score.fullTime) || {};
+    const minute = m.minute ? ` ${m.minute}分` : "";
+    applyApiScore({
+        home: m.homeTeam.shortName || m.homeTeam.name, away: m.awayTeam.shortName || m.awayTeam.name,
+        homeLogo: m.homeTeam.crest, awayLogo: m.awayTeam.crest,
+        homeGoals: ft.home ?? 0, awayGoals: ft.away ?? 0,
+        label: `予備API: ${FD_STATUS_LABEL[m.status] || m.status}${minute}（少し遅れて届きます）`
+    });
+    setStatus(syncNote);
 }
 
 async function runSync() {
@@ -731,7 +956,9 @@ async function runSync() {
 }
 
 async function startSync() {
-    if (!readApiKey()) {
+    const hasAf = readApiKey();
+    const hasFd = readFdKey();
+    if (!hasAf && !hasFd) {
         setStatus("APIキーを入力してください。", true);
         return;
     }
@@ -739,17 +966,28 @@ async function startSync() {
         setStatus("先に「試合を選ぶ」で試合を選んでください。", true);
         return;
     }
-
-    try {
-        await checkStatus();
-    } catch (e) {
-        setStatus(`キーを確認できませんでした（${e.message}）`, true);
+    if (state.fixture.provider === "fd" && !hasFd) {
+        setStatus("予備の football-data.org で選んだ試合です。予備のキーを入力してください。", true);
         return;
+    }
+
+    // API-FOOTBALL のキーは使用回数の確認で確かめる（予備があれば、確認できなくても予備で続ける）
+    if (hasAf && state.fixture.provider !== "fd") {
+        try {
+            await checkStatus();
+        } catch (e) {
+            if (!hasFd) {
+                setStatus(`キーを確認できませんでした（${e.message}）`, true);
+                return;
+            }
+        }
     }
 
     syncOn = true;
     nextSyncAt = 0;   // タイマーが動いていればすぐ1回取得する
-    setStatus(usageText());
+    const fdOnly = state.fixture.provider === "fd" || !hasAf;
+    syncNote = fdOnly ? "予備の football-data.org で取得" : "";
+    setStatus(syncNote || usageText());
     renderSyncButton();
 }
 
@@ -796,7 +1034,7 @@ $("sync-button").addEventListener("click", () => {
 function renderCountdown() {
     if (!syncOn || !isRunning() || !isFinite(nextSyncAt) || nextSyncAt === 0) return;
     const sec = Math.max(0, Math.ceil((nextSyncAt - Date.now()) / 1000));
-    setStatus([usageText(), `次回 ${sec}秒`].filter(Boolean).join("・"));
+    setStatus([syncNote || usageText(), `次回 ${sec}秒`].filter(Boolean).join("・"));
     $("bar-sync").textContent = `API: ON（次回 ${sec}秒）`;
 }
 
