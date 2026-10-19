@@ -1,12 +1,14 @@
 // サッカー配信用スコアボード
 // ・タイマーはブラウザ側で1秒ごとに表示を更新（開始時刻を基準に計算するので、再読み込みしてもずれない）
 // ・スコアは API-FOOTBALL から、選んだ試合を約80秒に1回取得（タイマーが動いている間だけ）。手動の +1 / -1 も可能
-// ・APIキーはこのページを開いている間だけメモリに持ち、どこにも保存しない
+// ・APIキーは既定ではこのページを開いている間だけメモリに持ち、どこにも保存しない
+//   （サイドバーの「このブラウザにキーを保存する」をオンにしたときだけ localStorage に保存する）
 
 const API_BASE = "https://v3.football.api-sports.io";
 const SYNC_INTERVAL_SEC = 80;
 const DAILY_RESERVE = 2;          // 1日の上限からこの回数を残して自動同期を止める
 const STORAGE_KEY = "scoreboard-state"; // キー以外の表示状態だけを保存する
+const API_KEY_STORAGE = "scoreboard-api-key"; // 保存を選んだときだけ使う（表示状態とは別に持つ）
 
 const $ = (id) => document.getElementById(id);
 
@@ -330,6 +332,33 @@ function readApiKey() {
     apiKey = $("api-key").value.trim();
     return apiKey !== "";
 }
+
+// ==== APIキーの保存（選んだ人だけ） ====
+function saveApiKeyIfChosen() {
+    try {
+        const key = $("api-key").value.trim();
+        if ($("api-key-save").checked && key !== "") {
+            localStorage.setItem(API_KEY_STORAGE, key);
+        } else {
+            localStorage.removeItem(API_KEY_STORAGE);
+        }
+    } catch (e) { }
+}
+
+function loadSavedApiKey() {
+    try {
+        const key = localStorage.getItem(API_KEY_STORAGE);
+        if (key) {
+            $("api-key").value = key;
+            $("api-key-save").checked = true;
+        }
+    } catch (e) { }
+}
+
+$("api-key-save").addEventListener("change", saveApiKeyIfChosen);
+$("api-key").addEventListener("input", () => {
+    if ($("api-key-save").checked) saveApiKeyIfChosen();
+});
 
 function nearDailyLimit() {
     return requestsLimit !== null && requestsUsed >= requestsLimit - DAILY_RESERVE;
@@ -943,6 +972,7 @@ document.addEventListener("mouseup", () => {
 
 // ==== 起動 ====
 loadState();
+loadSavedApiKey();
 if (state.darkMode) document.body.classList.add("dark-mode");
 renderSelectedMatch();
 renderLogo();

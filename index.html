@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <title>スコアボード</title>
-  <link rel="stylesheet" href="./style.css?v=23">
+  <link rel="stylesheet" href="./style.css?v=24">
 </head>
 
 <body>
@@ -25,6 +25,7 @@
 
     <div class="menu-title">API自動同期</div>
     <input type="password" id="api-key" placeholder="APIキーを入力" autocomplete="off" spellcheck="false">
+    <label class="menu-check" title="オンにすると、次に開いたときもキーが入った状態になります。共用のパソコンではオフのままにしてください"><input type="checkbox" id="api-key-save"> このブラウザにキーを保存する</label>
     <button id="picker-button" onclick="openPicker()">試合を選ぶ</button>
     <div id="selected-match" class="menu-match">試合: 未選択</div>
     <button id="sync-button" title="ON の間、タイマーが動いているときだけ 80秒ごとにスコアを取得します">自動同期 [ OFF ]</button>
@@ -127,7 +128,7 @@
     <div class="resizer" data-target="part-score"></div>
   </div>
 
-  <script src="./scoreboard.js?v=23"></script>
+  <script src="./scoreboard.js?v=24"></script>
 </body>
 
 </html>

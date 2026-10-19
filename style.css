@@ -230,6 +230,20 @@ button {
     margin: 4px 30px 6px;
 }
 
+.menu-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 30px 8px;
+    font-size: 13px;
+    color: #555;
+    cursor: pointer;
+}
+
+.menu-check input {
+    margin: 0;
+    padding: 0;
+}
 
 .menu-status {
     padding: 4px 30px 10px;
@@ -650,6 +664,10 @@ body.dark-mode .menu button:disabled {
 
 body.dark-mode .menu-title {
     border-top-color: #333;
+}
+
+body.dark-mode .menu-check {
+    color: #bbb;
 }
 
 body.dark-mode .menu-status {
