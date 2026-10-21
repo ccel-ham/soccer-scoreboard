@@ -21,6 +21,8 @@ let fdKey = "";
 let fdPauseUntil = 0;      // football-data.org の1分あたりの回数を使い切ったら、この時刻まで待つ
 let syncOn = false;
 let nextSyncAt = 0;
+let syncFailCount = 0;     // 一時的な通信エラーが続いた回数（自動同期を止めるかの判断に使う）
+const SYNC_FAIL_LIMIT = 3; // この回数続けて失敗したら自動同期を止める
 let requestsUsed = null;
 let requestsLimit = null;
 
@@ -556,7 +558,9 @@ async function callFd(path, params) {
     try {
         res = await fetch(`${FD_RELAY}?${q}`, { headers: { "X-FD-Key": fdKey }, cache: "no-store" });
     } catch (e) {
-        throw new Error("football-data.org の中継（fd.php）と通信できません");
+        const err = new Error("football-data.org の中継（fd.php）と通信できません");
+        err.transient = true;
+        throw err;
     }
     // 1分あたりの残り回数を使い切ったら、回数が戻るまで次の取得を待つ
     const left = res.headers.get("X-FD-Available-Minute");
@@ -567,6 +571,8 @@ async function callFd(path, params) {
     if (!res.ok || !data) {
         const err = new Error(fdErrorText(res.status, data));
         err.rateLimited = res.status === 429;
+        // 502〜504 は football-data.org までの通信の一時的な不調（遠い海外のサーバーで、時々返事が遅れる）
+        err.transient = [502, 503, 504].includes(res.status);
         throw err;
     }
     return data;
@@ -742,7 +748,8 @@ async function loadPickerFd() {
     } catch (e) {
         pickerFixtures = [];
         $("picker-list").innerHTML = "";
-        setPickerMessage(`試合一覧を取得できませんでした（${e.message}）`, true);
+        const hint = e.transient ? "。一時的な通信の不調です。少し待ってからもう一度開いてください" : "";
+        setPickerMessage(`試合一覧を取得できませんでした（${e.message}）${hint}`, true);
     }
 }
 
@@ -1012,14 +1019,20 @@ async function syncScoreFd() {
 async function runSync() {
     try {
         await syncScore();
+        syncFailCount = 0;
     } catch (e) {
         // football-data.org の1分あたりの回数切れは、止めずに回数が戻るまで待つ
-        if (!e.rateLimited) {
+        // 一時的な通信エラーは、続けて SYNC_FAIL_LIMIT 回までは止めずに次の回で取り直す
+        if (e.transient && ++syncFailCount < SYNC_FAIL_LIMIT) {
+            syncNote = `${e.message}。次の回で取り直します（${syncFailCount}回目）`;
+        } else if (!e.rateLimited) {
             stopSync();
-            setStatus(`エラーのため自動同期を止めました: ${e.message}`, true);
+            const times = e.transient ? `（${syncFailCount}回続けて失敗）` : "";
+            setStatus(`エラーのため自動同期を止めました${times}: ${e.message}`, true);
             return;
+        } else {
+            syncNote = `${e.message}。回数が戻るまで待ちます`;
         }
-        syncNote = `${e.message}。回数が戻るまで待ちます`;
     }
     if (syncOn) nextSyncAt = Math.max(Date.now() + syncIntervalMs(), fdPauseUntil);
 }
@@ -1051,6 +1064,7 @@ async function startSync() {
     }
 
     syncOn = true;
+    syncFailCount = 0;
     nextSyncAt = 0;   // タイマーが動いていればすぐ1回取得する
     syncNote = p === "fd" ? "football-data.org で取得" : "";
     setStatus(syncNote || usageText());
@@ -1307,8 +1321,32 @@ document.addEventListener("mouseup", () => {
     targetElement = null;
 });
 
+// ==== ページを閉じたらタイマーを止める ====
+// 閉じる・再読み込みのときに一時停止して保存する（開き直すと「再開」で続きから）
+function pauseTimerAt(time) {
+    if (!isRunning()) return;
+    state.baseSeconds += Math.max(0, Math.floor((time - state.startedAt) / 1000));
+    state.startedAt = null;
+}
+
+window.addEventListener("pagehide", () => {
+    pauseTimerAt(Date.now());
+    saveState();
+});
+
+// PC やブラウザが落ちて閉じる処理が動かなかったときの保険: 最後に画面が動いていた時刻で止める
+const ALIVE_SAVE_MS = 5000;
+let aliveSavedAt = 0;
+function saveAlive() {
+    if (!isRunning() || Date.now() - aliveSavedAt < ALIVE_SAVE_MS) return;
+    aliveSavedAt = Date.now();
+    state.aliveAt = aliveSavedAt;
+    saveState();
+}
+
 // ==== 起動 ====
 loadState();
+if (isRunning()) pauseTimerAt(Math.min(Date.now(), (state.aliveAt || Date.now()) + ALIVE_SAVE_MS));
 loadSavedApiKey();
 renderProvider();
 if (state.darkMode) document.body.classList.add("dark-mode");
@@ -1323,6 +1361,7 @@ applyLayout();
 
 setInterval(() => {
     renderTimer();
+    saveAlive();
     syncTick();
     renderCountdown();
 }, 1000);
